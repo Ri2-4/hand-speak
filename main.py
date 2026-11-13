@@ -27,6 +27,15 @@ class GestureCamera:
         # Thread synchronization
         self.lock = threading.Lock()
         self.stream_lock = threading.Lock()
+        # Browser frame processing
+        self.processing_lock = threading.Lock()
+
+        self.hands = self.mp_hands.Hands(
+           static_image_mode=False,
+           max_num_hands=2,
+           min_detection_confidence=0.5,
+           min_tracking_confidence=0.5
+    )
 
         # Gesture configuration
         self.finger_tips = [8, 12, 16, 20]
@@ -393,3 +402,61 @@ class GestureCamera:
                 cap.release()
 
             self.stream_lock.release()
+
+    
+    # ==========================================
+    # BROWSER FRAME PROCESSING
+    # ==========================================
+
+    def process_frame(self, frame):
+
+        with self.processing_lock:
+
+            start_time = time.time()
+
+            # Convert browser frame to RGB
+            rgb = cv2.cvtColor(
+                frame,
+                cv2.COLOR_BGR2RGB
+            )
+
+            results = self.hands.process(rgb)
+
+            detected_gesture = "NO GESTURE"
+            hand_count = 0
+
+            # Detect hands and recognize gestures
+            if results.multi_hand_landmarks:
+
+                hand_count = len(results.multi_hand_landmarks)
+
+                for hand_landmarks in results.multi_hand_landmarks:
+
+                    lm_list = hand_landmarks.landmark
+
+                    hand_gesture = self.detect_gesture(lm_list)
+
+                    if (
+                        detected_gesture == "NO GESTURE"
+                        and hand_gesture != "NO GESTURE"
+                    ):
+                        detected_gesture = hand_gesture
+
+            # Calculate processing FPS
+            elapsed = max(time.time() - start_time, 0.001)
+            fps = 1 / elapsed
+
+            # Update gesture history
+            if detected_gesture != "NO GESTURE":
+                self.add_detection(detected_gesture)
+
+            # Update dashboard statistics
+            with self.lock:
+
+                self.current_gesture = detected_gesture
+                self.hand_count = hand_count
+                self.fps = fps
+                self.camera_active = True
+                self.camera_error = None
+
+            return self.get_stats()

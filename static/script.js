@@ -10,15 +10,18 @@ document.addEventListener("DOMContentLoaded", () => {
     const cameraStatus = document.getElementById("camera-status");
     const statusDot = document.getElementById("status-dot");
     const cameraError = document.getElementById("camera-error");
+
     const cameraFeed = document.getElementById("camera-feed");
+    const cameraCanvas = document.getElementById("camera-canvas");
+
+    const startButton = document.getElementById("start-camera");
+    const stopButton = document.getElementById("stop-camera");
 
     const historyList = document.getElementById("history-list");
     const gestureDescription = document.getElementById("gesture-description");
 
-    // Stop if this script is loaded on a page without the dashboard
     if (!gestureElement) return;
 
-    // Gesture descriptions
     const descriptions = {
         "LIKE": "A positive thumbs-up gesture detected.",
         "DISLIKE": "A thumbs-down gesture detected.",
@@ -33,41 +36,38 @@ document.addEventListener("DOMContentLoaded", () => {
         "NO GESTURE": "Waiting for your next gesture..."
     };
 
+    let cameraStream = null;
+    let processing = false;
+    let cameraRunning = false;
+    let animationFrame = null;
+    let lastFrameTime = 0;
     let previousHistory = "";
-    let isUpdating = false;
 
-    // Update camera connection indicator
+    const frameInterval = 150;
+
+    // Camera status
     function setCameraStatus(active, message = "") {
 
-        if (cameraStatus) {
-            cameraStatus.textContent = active
-                ? "Camera active"
-                : "Camera offline";
-        }
+        cameraStatus.textContent = active
+            ? "Camera active"
+            : "Camera offline";
 
-        if (statusDot) {
-            statusDot.classList.toggle("offline", !active);
-        }
+        statusDot.classList.toggle("offline", !active);
 
-        if (cameraError) {
-            if (active) {
-                cameraError.style.display = "none";
-            } else {
-                cameraError.textContent = message || "Waiting for camera...";
-                cameraError.style.display = "block";
-            }
+        if (active) {
+            cameraError.style.display = "none";
+        } else {
+            cameraError.textContent = message;
+            cameraError.style.display = "block";
         }
     }
 
     // Update gesture history
     function updateHistory(history) {
 
-        if (!historyList) return;
-
         const safeHistory = Array.isArray(history) ? history : [];
         const historyKey = JSON.stringify(safeHistory);
 
-        // Avoid rebuilding the list if nothing changed
         if (historyKey === previousHistory) return;
 
         previousHistory = historyKey;
@@ -84,7 +84,7 @@ document.addEventListener("DOMContentLoaded", () => {
             return;
         }
 
-        safeHistory.forEach((item) => {
+        safeHistory.forEach(item => {
 
             const row = document.createElement("div");
             row.className = "history-item";
@@ -102,114 +102,196 @@ document.addEventListener("DOMContentLoaded", () => {
         });
     }
 
-    // Fetch and update dashboard information
-    async function updateDashboard() {
+    // Update dashboard
+    function updateDashboard(data) {
 
-        // Prevent overlapping requests
-        if (isUpdating) return;
+        const gesture = data.gesture || "NO GESTURE";
 
-        isUpdating = true;
+        gestureElement.textContent = gesture;
+        gestureStat.textContent = gesture;
+
+        gestureDescription.textContent =
+            descriptions[gesture] || "Gesture recognized.";
+
+        handCount.textContent = Number(data.hands) || 0;
+
+        fpsElement.textContent =
+            (Number(data.fps) || 0).toFixed(1);
+
+        updateHistory(data.history);
+
+        setCameraStatus(true);
+    }
+
+    // Send browser frame to Flask
+    async function processFrame() {
+
+        if (!cameraRunning || processing) return;
+
+        processing = true;
 
         try {
 
-            const response = await fetch("/api/stats", {
-                method: "GET",
-                cache: "no-store",
-                headers: {
-                    "Accept": "application/json"
-                }
+            const context = cameraCanvas.getContext("2d");
+
+            context.drawImage(
+                cameraFeed,
+                0,
+                0,
+                cameraCanvas.width,
+                cameraCanvas.height
+            );
+
+            const blob = await new Promise(resolve => {
+                cameraCanvas.toBlob(resolve, "image/jpeg", 0.75);
+            });
+
+            if (!blob) {
+                throw new Error("Could not capture camera frame.");
+            }
+
+            const formData = new FormData();
+
+            formData.append("frame", blob, "frame.jpg");
+
+            const response = await fetch("/api/process_frame", {
+                method: "POST",
+                body: formData
             });
 
             if (!response.ok) {
-                throw new Error("Unable to retrieve camera data.");
+                throw new Error("Frame processing failed.");
             }
 
             const data = await response.json();
 
-            // Gesture information
-            const gesture = data.gesture || "NO GESTURE";
-
-            gestureElement.textContent = gesture;
-
-            if (gestureStat) {
-                gestureStat.textContent = gesture;
-            }
-
-            if (gestureDescription) {
-                gestureDescription.textContent =
-                    descriptions[gesture] || "Gesture recognized.";
-            }
-
-            // Camera statistics
-            if (handCount) {
-                handCount.textContent = Number(data.hands) || 0;
-            }
-
-            if (fpsElement) {
-                fpsElement.textContent = (Number(data.fps) || 0).toFixed(1);
-            }
-
-            // Detection history
-            updateHistory(data.history);
-
-            // Camera status
-            if (data.active) {
-                setCameraStatus(true);
-            } else {
-                setCameraStatus(false, data.error);
-            }
+            updateDashboard(data);
 
         } catch (error) {
 
-            console.error("Dashboard update error:", error);
+            console.error("Frame processing error:", error);
 
-            setCameraStatus(
-                false,
-                "Unable to connect to the camera. Please check your connection."
-            );
+            setCameraStatus(false, error.message);
 
         } finally {
 
-            isUpdating = false;
-
+            processing = false;
         }
     }
 
-    // Handle camera stream errors
-    if (cameraFeed) {
+    // Camera processing loop
+    function cameraLoop(timestamp) {
 
-        cameraFeed.addEventListener("error", () => {
+        if (!cameraRunning) return;
 
-            if (cameraError) {
-                cameraError.textContent =
-                    "Camera stream unavailable. Check webcam permissions and connection.";
+        if (timestamp - lastFrameTime >= frameInterval) {
 
-                cameraError.style.display = "block";
-            }
+            lastFrameTime = timestamp;
 
-            if (cameraStatus) {
-                cameraStatus.textContent = "Stream unavailable";
-            }
+            processFrame();
+        }
 
-            if (statusDot) {
-                statusDot.classList.add("offline");
-            }
-
-        });
-
-        cameraFeed.addEventListener("load", () => {
-
-            if (cameraError) {
-                cameraError.style.display = "none";
-            }
-
-        });
+        animationFrame = requestAnimationFrame(cameraLoop);
     }
 
-    // Initial dashboard update
-    updateDashboard();
+    // Start webcam
+    async function startCamera() {
 
-    // Refresh dashboard statistics every second
-    setInterval(updateDashboard, 1000);
+        try {
+
+            if (!navigator.mediaDevices ||
+                !navigator.mediaDevices.getUserMedia) {
+
+                throw new Error(
+                    "Camera access requires HTTPS or localhost."
+                );
+            }
+
+            cameraError.textContent = "Requesting camera permission...";
+            cameraError.style.display = "block";
+
+            cameraStream = await navigator.mediaDevices.getUserMedia({
+                video: {
+                    width: { ideal: 640 },
+                    height: { ideal: 480 },
+                    facingMode: "user"
+                },
+                audio: false
+            });
+
+            cameraFeed.srcObject = cameraStream;
+
+            await cameraFeed.play();
+
+            cameraCanvas.width = cameraFeed.videoWidth;
+            cameraCanvas.height = cameraFeed.videoHeight;
+
+            cameraRunning = true;
+
+            startButton.disabled = true;
+            stopButton.disabled = false;
+
+            setCameraStatus(true);
+
+            cameraError.style.display = "none";
+
+            animationFrame = requestAnimationFrame(cameraLoop);
+
+        } catch (error) {
+
+            console.error("Camera startup error:", error);
+
+            setCameraStatus(false, error.message);
+        }
+    }
+
+    // Stop webcam
+    function stopCamera() {
+
+        cameraRunning = false;
+
+        if (animationFrame) {
+            cancelAnimationFrame(animationFrame);
+            animationFrame = null;
+        }
+
+        if (cameraStream) {
+
+            cameraStream.getTracks().forEach(track => track.stop());
+
+            cameraStream = null;
+        }
+
+        cameraFeed.srcObject = null;
+
+        startButton.disabled = false;
+        stopButton.disabled = true;
+
+        handCount.textContent = "0";
+        fpsElement.textContent = "0.0";
+
+        gestureElement.textContent = "NO GESTURE";
+        gestureStat.textContent = "NO GESTURE";
+
+        gestureDescription.textContent =
+            descriptions["NO GESTURE"];
+
+        setCameraStatus(false, "Camera stopped.");
+
+        // Reset backend camera status
+        fetch("/api/camera/stop", {
+            method: "POST"
+        }).catch(console.error);
+    }
+
+    startButton.addEventListener("click", startCamera);
+    stopButton.addEventListener("click", stopCamera);
+
+    // Cleanup when leaving dashboard
+    window.addEventListener("pagehide", stopCamera);
+
+    stopButton.disabled = true;
+
+    setCameraStatus(false, "Click Start Camera to begin.");
 
 });

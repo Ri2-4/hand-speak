@@ -149,11 +149,14 @@
 
                     <div class="camera-frame">
 
-                        <img
-                            src="{{ url_for('video_feed') }}"
-                            alt="Live hand gesture camera feed"
+                        <video
                             id="camera-feed"
-                        >
+                            autoplay
+                            playsinline
+                            muted
+                        ></video>
+
+                        <canvas id="camera-canvas" hidden></canvas>
 
                         <div
                             class="camera-overlay"
@@ -161,7 +164,7 @@
                             role="status"
                             aria-live="polite"
                         >
-                            Starting camera...
+                            Click Start Camera to begin gesture detection.
                         </div>
 
                     </div>
@@ -170,6 +173,15 @@
                         Keep your hand visible and well-lit for
                         accurate recognition.
                     </p>
+                    <div class="camera-controls">
+                    <button type="button" id="start-camera">
+                        Start Camera
+                    </button>
+
+                    <button type="button" id="stop-camera" disabled>
+                        Stop Camera
+                    </button>
+                </div>
 
                 </div>
 

@@ -1,6 +1,11 @@
 
+import cv2
+import numpy as np
 import os
-import sqlite3
+import psycopg
+
+from dotenv import load_dotenv
+from psycopg.rows import dict_row
 from functools import wraps
 
 from flask import (
@@ -8,6 +13,7 @@ from flask import (
     redirect, url_for, flash, session,
     Response, jsonify
 )
+
 from werkzeug.security import (
     generate_password_hash,
     check_password_hash
@@ -15,6 +21,12 @@ from werkzeug.security import (
 
 from main import GestureCamera
 
+
+# ==========================================
+# LOAD ENVIRONMENT VARIABLES
+# ==========================================
+
+load_dotenv()
 
 app = Flask(__name__)
 
@@ -28,10 +40,11 @@ app.config.update(
     SESSION_COOKIE_SAMESITE="Lax"
 )
 
-DATABASE = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)),
-    "users.db"
-)
+DATABASE_URL = os.environ.get("DATABASE_URL")
+
+if not DATABASE_URL:
+    raise RuntimeError("DATABASE_URL is missing from the .env file.")
+
 
 camera = GestureCamera()
 
@@ -41,28 +54,30 @@ camera = GestureCamera()
 # ==========================================
 
 def get_db():
-
-    connection = sqlite3.connect(DATABASE)
-    connection.row_factory = sqlite3.Row
-
-    return connection
+    return psycopg.connect(
+        DATABASE_URL,
+        row_factory=dict_row
+    )
 
 
 def init_db():
 
     connection = get_db()
 
-    connection.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL,
-            email TEXT UNIQUE NOT NULL,
-            password TEXT NOT NULL
-        )
-    """)
+    try:
+        connection.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                id BIGSERIAL PRIMARY KEY,
+                name TEXT NOT NULL,
+                email TEXT UNIQUE NOT NULL,
+                password TEXT NOT NULL
+            )
+        """)
 
-    connection.commit()
-    connection.close()
+        connection.commit()
+
+    finally:
+        connection.close()
 
 
 # ==========================================
@@ -138,7 +153,7 @@ def signup():
                 connection.execute(
                     """
                     INSERT INTO users (name, email, password)
-                    VALUES (?, ?, ?)
+                    VALUES (%s, %s, %s)
                     """,
                     (name, email, hashed_password)
                 )
@@ -152,7 +167,9 @@ def signup():
 
                 return redirect(url_for("login"))
 
-            except sqlite3.IntegrityError:
+            except psycopg.IntegrityError:
+
+                connection.rollback()
 
                 flash(
                     "An account with this email already exists.",
@@ -182,12 +199,15 @@ def login():
 
         connection = get_db()
 
-        user = connection.execute(
-            "SELECT * FROM users WHERE email = ?",
-            (email,)
-        ).fetchone()
+        try:
 
-        connection.close()
+            user = connection.execute(
+                "SELECT * FROM users WHERE email = %s",
+                (email,)
+            ).fetchone()
+
+        finally:
+            connection.close()
 
         if user and check_password_hash(
             user["password"],
@@ -244,6 +264,76 @@ def video_feed():
 def stats():
 
     return jsonify(camera.get_stats())
+
+
+# ==========================================
+# PROCESS BROWSER CAMERA FRAMES
+# ==========================================
+
+@app.route("/api/process_frame", methods=["POST"])
+@login_required
+def process_frame():
+
+    if "frame" not in request.files:
+        return jsonify({
+            "error": "No camera frame received."
+        }), 400
+
+    file = request.files["frame"]
+
+    image_bytes = file.read()
+
+    image_array = np.frombuffer(
+        image_bytes,
+        dtype=np.uint8
+    )
+
+    frame = cv2.imdecode(
+        image_array,
+        cv2.IMREAD_COLOR
+    )
+
+    if frame is None:
+        return jsonify({
+            "error": "Invalid camera frame."
+        }), 400
+
+    try:
+        stats_data = camera.process_frame(frame)
+        return jsonify(stats_data)
+
+    except Exception:
+        app.logger.exception("Frame processing failed")
+
+        return jsonify({
+            "error": "Unable to process camera frame."
+        }), 500
+
+
+# ==========================================
+# STOP BROWSER CAMERA
+# ==========================================
+
+@app.route("/api/camera/stop", methods=["POST"])
+@login_required
+def stop_camera():
+
+    with camera.processing_lock:
+
+        with camera.lock:
+            camera.camera_active = False
+            camera.current_gesture = "NO GESTURE"
+            camera.hand_count = 0
+            camera.fps = 0
+            camera.camera_error = None
+
+        camera.last_gesture = ""
+        camera.last_detection_time = 0
+
+    return jsonify({
+        "success": True,
+        "message": "Camera stopped."
+    })
 
 
 # ==========================================
